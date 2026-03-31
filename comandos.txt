@@ -1,0 +1,25 @@
+
+   -    pnpm i dotenv joi
+
+   -    nest g res payments --no-spec
+
+   -    pnpm install stripe --save
+
+   -    pnpm add class-validator class-transformer
+
+
+
+
+   -------- Stripe 
+
+      * Comandos
+
+         -  stripe login
+         -  stripe listen --forward-to localhost:3003/payments/webhook
+         -  stripe trigger payment_intent.succeeded
+
+
+      * Para crear conexiones de stripe reales con nuestra web precisamos de un intermediario https://hookdeck.com/
+
+         -  pnpm add hookdeck-cli -g
+         -  hookdeck login
