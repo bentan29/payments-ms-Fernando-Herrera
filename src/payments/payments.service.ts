@@ -1,16 +1,24 @@
-import { Injectable } from '@nestjs/common';
-import { envs } from 'src/config';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { envs, NATS_SERVICE } from 'src/config';
 import Stripe from 'stripe';
 import { PaymentSessionDto } from './dto/payment-session.dto';
 import { Request, Response } from 'express';
+import { ClientProxy } from '@nestjs/microservices';
 
 @Injectable()
 export class PaymentsService {
 
     private readonly stripe = new Stripe(envs.stripeSecret)
 
+    private readonly logger = new Logger('PaymentsService')
 
-    //?-------------------------
+    //- Conexion con Nats
+    constructor(
+        @Inject(NATS_SERVICE) private readonly client: ClientProxy
+    ){}
+
+
+    //?------------------------- Creamos el pago
     async createPaymentSession(paymentSessionDto: PaymentSessionDto) {
 
         const { currency, items, orderId } = paymentSessionDto
@@ -34,7 +42,7 @@ export class PaymentsService {
             payment_intent_data: {
                 metadata: {
                     orderId: orderId
-                } //- La metadata es la info adicional del registro, ejmeplo, id usuario informacion de usuario etc, como para indicar que el pago lo hace tal persona
+                } //- La metadata es la info adicional del registro, ejemplo, id usuario informacion de usuario etc, como para indicar que el pago lo hace tal persona
             },
             //- Arreglo de items que el usuario esta comprando
             line_items: lineItems,
@@ -44,14 +52,20 @@ export class PaymentsService {
             cancel_url: envs.stripeCancelUrl //- Si algo sale mal A donde nos dirigimos cuando se hace el pago
         });
 
-        return session;
+        return {
+            cancelUrl: session.cancel_url,
+            successUrl: session.success_url,
+            url: session.url, //- url de stripe
+        };
     }
 
 
-    //?-------------------------
+    //?------------- Webhook que viene de stripe con el pago realizado
     async stripeWebhook(req: Request, res: Response) {
 
-        //- sig es la signature que serua una firma digital en los headers
+        //--- Cuando Stripe llama a tu webhook, incluye en los headers HTTP un campo llamado stripe-signature. 
+        // Este header lo genera Stripe automáticamente y contiene una firma criptográfica (HMAC-SHA256) que se construye así: stripe-signature: t=timestamp,v1=firma_hash,...
+        //- sig es la signature -> seria una firma digital en los headers
         const sig = req.headers['stripe-signature']!;
 
         let event: Stripe.Event;
@@ -63,8 +77,11 @@ export class PaymentsService {
         const endpointSecret = envs.stripeEndpointSecret;
 
         try {
+            //-- stripe.webhooks.constructEvent() usa esa firma del sig para verificar que el request realmente viene de Stripe y no de alguien que está intentando falsificar un pago:
             event = this.stripe.webhooks.constructEvent(
-                req['rawBody'], sig, endpointSecret
+                req['rawBody'], 
+                sig, 
+                endpointSecret
             );
         } catch (err) {
             res.status(400).send(`Webhook Error: ${err.message}`)
@@ -74,11 +91,13 @@ export class PaymentsService {
         switch(event.type) {
             case 'charge.succeeded':
                 const chargeSucceeded = event.data.object;
-                console.log({
-                    metadata: chargeSucceeded.metadata,
-                    orederId: chargeSucceeded.metadata.orderId
-                });
-                //- llamamos a nuestro microservicio
+                const payload = {
+                    stripePaymentId: chargeSucceeded.id,
+                    orderId: chargeSucceeded.metadata.orderId,
+                    receiptUrl: chargeSucceeded.receipt_url //- url del recivo de pago
+                }
+                //? Emitimos a Nats, lo tenemos en esucha en orders
+                this.client.emit('payment.succeeded', payload) //- .emit a diferencia de .send es que no espera una respuesta
             break;
 
             default:
